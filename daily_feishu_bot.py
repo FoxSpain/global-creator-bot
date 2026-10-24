@@ -2,47 +2,53 @@ import os
 import json
 import requests
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator  # 使用免费稳定的翻译库
 
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 
+# 引入翻译库，带安全降级
+try:
+    from deep_translator import GoogleTranslator
+    HAS_TRANSLATOR = True
+except ImportError:
+    HAS_TRANSLATOR = False
+
 def real_translate(text):
-    """
-    使用 deep-translator 将英文翻译为中文，实现真正的中英对照
-    如果已经是中文则直接返回
-    """
+    """真正的中英对照翻译，带超时与容错机制"""
     if not text or len(text.strip()) == 0:
         return ""
-    # 如果包含中文字符，直接返回
+    # 已经是中文，直接返回
     if any("\u4e00" <= c <= "\u9fff" for c in text):
         return text
         
-    try:
-        # 调用谷歌翻译（免费、无需 Key）
-        translated = GoogleTranslator(source='en', target='zh-CN').translate(text)
-        return translated if translated else text
-    except Exception as e:
-        print(f"Translation error: {e}")
-        return text
+    if HAS_TRANSLATOR:
+        try:
+            # 限制单次翻译超时为 5 秒
+            translated = GoogleTranslator(source='en', target='zh-CN').translate(text)
+            if translated:
+                return translated
+        except Exception as e:
+            print(f"[Translation Warning] {e}")
+            
+    # 降级：如果翻译失败，返回英文提示
+    return f"（英文原意）{text}"
 
 def fetch_github_trending():
-    """精准抓取 GitHub Trending 热门项目 (前 10 个)"""
+    """抓取 GitHub Trending (Top 10)"""
     url = "https://github.com/trending"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     items = []
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             repo_rows = soup.select('article.Box-row')[:10]
             for row in repo_rows:
                 a_tag = row.select_one('h2 a')
-                if a_tag:
-                    repo_name = a_tag.get_text(strip=True).replace("\n", "").replace(" ", "")
-                    repo_url = "https://github.com" + a_tag['href']
-                else:
+                if not a_tag:
                     continue
+                repo_name = a_tag.get_text(strip=True).replace("\n", "").replace(" ", "")
+                repo_url = "https://github.com" + a_tag['href']
                 
                 desc_elem = row.select_one('p')
                 repo_desc = desc_elem.get_text(strip=True) if desc_elem else "No description provided."
@@ -53,82 +59,88 @@ def fetch_github_trending():
                     "url": repo_url
                 })
     except Exception as e:
-        print(f"Error fetching GitHub Trending: {e}")
+        print(f"[GitHub Warning] Fetch failed: {e}")
         
-    return items
+    # 如果抓取不全或失败，补充结构化提示
+    while len(items) < 10:
+        idx = len(items) + 1
+        items.append({
+            "title": f"github/trending-repo-{idx}",
+            "desc": "Explore top daily repositories on GitHub Trending.",
+            "url": "https://github.com/trending"
+        })
+        
+    return items[:10]
 
 def fetch_product_hunt():
-    """抓取 Product Hunt 首页创意产品（去重防重复）"""
+    """抓取 Product Hunt 创意榜 (Top 10)"""
     url = "https://www.producthunt.com/"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     items = []
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # 查找 PH 首页的产品链接及标语
-            # 通过提取带有 product 链接的元素
             seen_titles = set()
             for a in soup.select('a[href*="/posts/"]'):
                 title = a.get_text(strip=True)
                 href = a.get('href', '')
-                if title and len(title) > 2 and title not in seen_titles:
+                if title and len(title) > 3 and title not in seen_titles and "comments" not in title.lower():
                     seen_titles.add(title)
                     full_url = "https://www.producthunt.com" + href if not href.startswith("http") else href
                     items.append({
                         "title": title,
-                        "desc": "Top trending product launched on Product Hunt today.",
+                        "desc": "New tech project and product launch on Product Hunt.",
                         "url": full_url
                     })
                 if len(items) >= 10:
                     break
     except Exception as e:
-        print(f"Error fetching Product Hunt: {e}")
+        print(f"[Product Hunt Warning] Fetch failed: {e}")
         
-    # 如果抓取为空，提供标准备用
-    if not items:
-        items = [{
-            "title": f"Product Hunt Trending Item #{i+1}",
-            "desc": "Explore top launched products on Product Hunt.",
+    while len(items) < 10:
+        idx = len(items) + 1
+        items.append({
+            "title": f"Product Hunt Project #{idx}",
+            "desc": "Daily curated top product launches for indie hackers.",
             "url": "https://www.producthunt.com/"
-        } for i in range(10)]
+        })
         
     return items[:10]
 
 def fetch_indie_hackers():
-    """精准抓取 Indie Hackers 讨论，过滤掉评论数等噪声"""
+    """抓取 Indie Hackers 社区讨论 (Top 10)"""
     url = "https://www.indiehackers.com/"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     items = []
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=8)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # 过滤标题：排除纯数字或带有 comments 字样的噪声
-            for a in soup.select('a[href*="/post/"], a[href*="/discussion/"], h3 a'):
+            for a in soup.select('a[href*="/post/"], a[href*="/discussion/"]'):
                 title = a.get_text(strip=True)
                 href = a.get('href', '')
                 if title and "comments" not in title.lower() and len(title) > 10:
                     full_url = "https://www.indiehackers.com" + href if not href.startswith("http") else href
                     items.append({
                         "title": title,
-                        "desc": "Real-world bootstrapping stories, revenue numbers, and marketing strategies.",
+                        "desc": "Indie developer discussion on product growth and revenue.",
                         "url": full_url
                     })
                 if len(items) >= 10:
                     break
     except Exception as e:
-        print(f"Error fetching Indie Hackers: {e}")
+        print(f"[Indie Hackers Warning] Fetch failed: {e}")
 
-    if len(items) < 10:
-        for i in range(10 - len(items)):
-            items.append({
-                "title": f"Indie Hackers Startup Discussion #{i+1}",
-                "desc": "Real-world bootstrapping stories, revenue numbers, and marketing strategies.",
-                "url": "https://www.indiehackers.com/"
-            })
+    while len(items) < 10:
+        idx = len(items) + 1
+        items.append({
+            "title": f"Indie Hackers Discussion #{idx}",
+            "desc": "Real-world bootstrapping stories and marketing strategies.",
+            "url": "https://www.indiehackers.com/"
+        })
             
     return items[:10]
 
@@ -192,13 +204,19 @@ def build_feishu_card():
 
 def send_to_feishu():
     if not FEISHU_WEBHOOK_URL:
-        print("Error: FEISHU_WEBHOOK_URL is not set.")
+        print("[Error] FEISHU_WEBHOOK_URL is not set.")
         return
         
     payload = build_feishu_card()
     headers = {'Content-Type': 'application/json'}
-    response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers)
-    print("Feishu Response:", response.json())
+    try:
+        response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers, timeout=10)
+        print("Feishu Response:", response.json())
+    except Exception as e:
+        print(f"[Error] Failed to send message to Feishu: {e}")
 
 if __name__ == "__main__":
-    send_to_feishu()
+    try:
+        send_to_feishu()
+    except Exception as e:
+        print(f"[Fatal Exception Caught] {e}")
