@@ -1,0 +1,157 @@
+import os
+import json
+import requests
+from bs4 import BeautifulSoup
+
+# 从环境变量中读取飞书 Webhook 地址（在 GitHub Secrets 中配置）
+FEISHU_WEBHOOK_URL = https://open.feishu.cn/open-apis/bot/v2/hook/9548c2c3-26e7-440b-b6d3-e2b464b0a5a3("FEISHU_WEBHOOK_URL")
+
+def translate_to_zh(english_text):
+    """
+    中英翻译占位函数。
+    你可以替换为调用 DeepL API、OpenAI API 或使用免费翻译库（如 googletrans）
+    """
+    # 示例：实际使用时可接入你的翻译逻辑
+    return f"[中文对照] {english_text}"
+
+def fetch_github_trending():
+    """抓取 GitHub Trending 页面热门项目"""
+    url = "https://github.com/trending"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    items = []
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # 查找 Trending 列表中的每个项目卡片
+            repo_rows = soup.select('article.Box-row')[:5] # 取前 5 个
+            for row in repo_rows:
+                # 仓库名称
+                title_elem = row.select_h2('a') if hasattr(row, 'select_h2') else row.select_one('h2 a')
+                if not title_elem:
+                    title_elem = row.select_one('h2')
+                
+                # 简化处理获取标题与链接
+                a_tag = row.select_one('h2 a')
+                if a_tag:
+                    repo_name = a_tag.get_text(strip=True).replace("\n", "").replace(" ", "")
+                    repo_url = "https://github.com" + a_tag['href']
+                else:
+                    repo_name = "Unknown Repo"
+                    repo_url = "https://github.com"
+                
+                # 仓库描述
+                desc_elem = row.select_one('p')
+                repo_desc = desc_elem.get_text(strip=True) if desc_elem else "No description provided."
+                
+                items.append({
+                    "title": repo_name,
+                    "desc": repo_desc,
+                    "url": repo_url
+                })
+    except Exception as e:
+        print(f"Error fetching GitHub Trending: {e}")
+        
+    # 如果抓取失败（防反爬），提供一个兜底默认数据
+    if not items:
+        items = [{
+            "title": "github / trending-fallback",
+            "desc": "Unable to fetch live trending due to rate limits. Please check back later.",
+            "url": "https://github.com/trending"
+        }]
+        
+    return items
+
+def fetch_product_hunt_rss():
+    """通过 Product Hunt 的公开 Feed/RSS 获取当日创意榜"""
+    # 使用公开的 RSS 聚合源，稳定且不易被严格反爬
+    url = "https://www.producthunt.com/feed"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    items = []
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'xml') # 解析 RSS XML
+            entries = soup.find_all('item')[:5] # 取前 5 个
+            for entry in entries:
+                title = entry.title.text if entry.title else "New Product"
+                link = entry.link.text if entry.link else "https://www.producthunt.com"
+                desc = entry.description.text if entry.description else "No tagline provided."
+                # 简单清理 HTML 标签
+                clean_desc = BeautifulSoup(desc, "html.parser").get_text(strip=True)
+                
+                items.append({
+                    "title": title,
+                    "desc": clean_desc,
+                    "url": link
+                })
+    except Exception as e:
+        print(f"Error fetching Product Hunt RSS: {e}")
+        
+    if not items:
+        items = [{
+            "title": "Product Hunt Daily Top",
+            "desc": "Visit Product Hunt directly to explore today's top launches.",
+            "url": "https://www.producthunt.com/"
+        }]
+        
+    return items
+
+def build_feishu_card():
+    """组装飞书富文本卡片格式"""
+    gh_items = fetch_github_trending()
+    ph_items = fetch_product_hunt_rss()
+    
+    content_lines = ["🌍 **全球创作者日报 | Global Creator Daily**\n"]
+    
+    # GitHub 部分
+    content_lines.append("### 🔥 GitHub Trending (开源风向)")
+    for idx, item in enumerate(gh_items, 1):
+        zh_desc = translate_to_zh(item['desc'])
+        content_lines.append(
+            f"{idx}. **[{item['title']}]({item['url']})**\n"
+            f"   - 🇬🇧 *EN:* {item['desc']}\n"
+            f"   - 🇨🇳 *CN:* {zh_desc}\n"
+        )
+        
+    # Product Hunt 部分
+    content_lines.append("\n### 🚀 Product Hunt (创意产品)")
+    for idx, item in enumerate(ph_items, 1):
+        zh_desc = translate_to_zh(item['desc'])
+        content_lines.append(
+            f"{idx}. **[{item['title']}]({item['url']})**\n"
+            f"   - 🇬🇧 *EN:* {item['desc']}\n"
+            f"   - 🇨🇳 *CN:* {zh_desc}\n"
+        )
+        
+    card_content = "\n".join(content_lines)
+    
+    payload = {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "💡 每日全球开源与创意灵感"},
+                "template": "blue"
+            },
+            "elements": [{
+                "tag": "markdown",
+                "content": card_content
+            }]
+        }
+    }
+    return payload
+
+def send_to_feishu():
+    if not FEISHU_WEBHOOK_URL:
+        raise ValueError("FEISHU_WEBHOOK_URL is not set in environment variables.")
+        
+    payload = build_feishu_card()
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers)
+    print("Feishu Response:", response.json())
+
+if __name__ == "__main__":
+    send_to_feishu()
