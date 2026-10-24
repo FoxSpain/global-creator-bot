@@ -55,47 +55,68 @@ def fetch_github_trending():
     return items[:10]
 
 def fetch_product_hunt():
-    """通过更稳定的聚合 RSS 源获取 Product Hunt 创意榜 (Top 10)"""
-    # 使用公开稳定的 RSS 转换代理源，完美避开 Cloudflare 盾牌
-    url = "https://www.producthunt.com/feed"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    """多通道抓取 Product Hunt 每日产品 ( Top 10 )"""
     items = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            # 用 html.parser 或 xml 解析 RSS 节点
-            soup = BeautifulSoup(response.text, 'html.parser')
-            entries = soup.find_all('item')[:10]
-            for entry in entries:
-                title = entry.title.text if entry.title else "New Product"
-                link = entry.link.text if entry.link else "https://www.producthunt.com"
-                desc_html = entry.description.text if entry.description else "No tagline provided."
-                clean_desc = BeautifulSoup(desc_html, 'html.parser').get_text(strip=True)
-                if len(clean_desc) > 120:
-                    clean_desc = clean_desc[:120] + "..."
+    # 通道 1：使用 RSSHub 公开节点 (对 GitHub Actions 最友好的镜像源)
+    sources = [
+        "https://rsshub.app/producthunt/today",
+        "https://rsshub.rssfeed.today/producthunt/today",
+        "https://www.producthunt.com/feed"
+    ]
+    
+    for url in sources:
+        try:
+            response = requests.get(url, headers=headers, timeout=8)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                entries = soup.find_all(['item', 'entry'])
+                for entry in entries:
+                    title_elem = entry.find('title')
+                    link_elem = entry.find('link')
+                    desc_elem = entry.find(['description', 'summary', 'content'])
                     
-                items.append({
-                    "title": title,
-                    "desc": clean_desc or "Creative product launched on Product Hunt today.",
-                    "url": link
-                })
-    except Exception as e:
-        print(f"[Product Hunt Warning] {e}")
-        
-    # 如果依然拿不到，提供结构化兜底，确保数量稳定为 10 条
-    while len(items) < 10:
-        idx = len(items) + 1
-        items.append({
-            "title": f"Product Hunt Daily Launch #{idx}",
-            "desc": "Explore top daily creative products and launches.",
+                    title = title_elem.text.strip() if title_elem else ""
+                    
+                    # 提取链接
+                    link = "https://www.producthunt.com"
+                    if link_elem:
+                        link = link_elem.get('href') or link_elem.text.strip()
+                        
+                    # 提取 Tagline/描述
+                    desc = "New creative product on Product Hunt."
+                    if desc_elem:
+                        clean_text = BeautifulSoup(desc_elem.text, 'html.parser').get_text(strip=True)
+                        if clean_text:
+                            desc = clean_text[:120] + "..." if len(clean_text) > 120 else clean_text
+                            
+                    if title and title not in [i['title'] for i in items]:
+                        items.append({
+                            "title": title,
+                            "desc": desc,
+                            "url": link
+                        })
+                    if len(items) >= 10:
+                        break
+            if len(items) >= 5: # 拿到了有效数据就退出轮询
+                break
+        except Exception as e:
+            print(f"[Product Hunt Source Warning] {url}: {e}")
+
+    # 如果抓取依旧受阻，进行保底处理
+    if not items:
+        print("[Product Hunt Error] All sources failed, using fallback.")
+        items = [{
+            "title": f"Product Hunt Hot Product #{i+1}",
+            "desc": "Check daily launches directly on Product Hunt website.",
             "url": "https://www.producthunt.com/"
-        })
-        
+        } for i in range(10)]
+
     return items[:10]
 
 def fetch_indie_hackers():
-    """抓取 Indie Hackers 热门讨论与动态 (Top 10)"""
+    """抓取 Indie Hackers 热门讨论 (Top 10)"""
     url = "https://www.indiehackers.com/"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     items = []
@@ -119,14 +140,6 @@ def fetch_indie_hackers():
     except Exception as e:
         print(f"[Indie Hackers Warning] {e}")
 
-    while len(items) < 10:
-        idx = len(items) + 1
-        items.append({
-            "title": f"Indie Hackers Discussion #{idx}",
-            "desc": "Real-world bootstrapping stories and marketing strategies.",
-            "url": "https://www.indiehackers.com/"
-        })
-            
     return items[:10]
 
 def build_feishu_card():
