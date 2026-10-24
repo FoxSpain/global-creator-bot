@@ -3,19 +3,14 @@ import json
 import requests
 from bs4 import BeautifulSoup
 
-# 从环境变量中读取飞书 Webhook 地址（在 GitHub Secrets 中配置）
-FEISHU_WEBHOOK_URL = https://open.feishu.cn/open-apis/bot/v2/hook/9548c2c3-26e7-440b-b6d3-e2b464b0a5a3("FEISHU_WEBHOOK_URL")
+FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 
 def translate_to_zh(english_text):
-    """
-    中英翻译占位函数。
-    你可以替换为调用 DeepL API、OpenAI API 或使用免费翻译库（如 googletrans）
-    """
-    # 示例：实际使用时可接入你的翻译逻辑
+    """简单中英对照翻译占位"""
     return f"[中文对照] {english_text}"
 
 def fetch_github_trending():
-    """抓取 GitHub Trending 页面热门项目"""
+    """抓取 GitHub Trending 热门项目"""
     url = "https://github.com/trending"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     items = []
@@ -24,15 +19,8 @@ def fetch_github_trending():
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # 查找 Trending 列表中的每个项目卡片
-            repo_rows = soup.select('article.Box-row')[:5] # 取前 5 个
+            repo_rows = soup.select('article.Box-row')[:5]
             for row in repo_rows:
-                # 仓库名称
-                title_elem = row.select_h2('a') if hasattr(row, 'select_h2') else row.select_one('h2 a')
-                if not title_elem:
-                    title_elem = row.select_one('h2')
-                
-                # 简化处理获取标题与链接
                 a_tag = row.select_one('h2 a')
                 if a_tag:
                     repo_name = a_tag.get_text(strip=True).replace("\n", "").replace(" ", "")
@@ -41,7 +29,6 @@ def fetch_github_trending():
                     repo_name = "Unknown Repo"
                     repo_url = "https://github.com"
                 
-                # 仓库描述
                 desc_elem = row.select_one('p')
                 repo_desc = desc_elem.get_text(strip=True) if desc_elem else "No description provided."
                 
@@ -51,35 +38,32 @@ def fetch_github_trending():
                     "url": repo_url
                 })
     except Exception as e:
-        print(f"Error fetching GitHub Trending: {e}")
+        print(f"Warning: Error fetching GitHub Trending: {e}")
         
-    # 如果抓取失败（防反爬），提供一个兜底默认数据
+    # 兜底数据，确保即使抓取失败脚本也不会报错退出
     if not items:
         items = [{
             "title": "github / trending-fallback",
-            "desc": "Unable to fetch live trending due to rate limits. Please check back later.",
+            "desc": "Temporary fallback item due to network/rate limits.",
             "url": "https://github.com/trending"
         }]
-        
     return items
 
 def fetch_product_hunt_rss():
-    """通过 Product Hunt 的公开 Feed/RSS 获取当日创意榜"""
-    # 使用公开的 RSS 聚合源，稳定且不易被严格反爬
+    """通过 Product Hunt RSS 获取创意榜"""
     url = "https://www.producthunt.com/feed"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     items = []
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'xml') # 解析 RSS XML
-            entries = soup.find_all('item')[:5] # 取前 5 个
+            soup = BeautifulSoup(response.text, 'html.parser') # 使用通用 html.parser 解析 RSS
+            entries = soup.find_all('item')[:5]
             for entry in entries:
                 title = entry.title.text if entry.title else "New Product"
                 link = entry.link.text if entry.link else "https://www.producthunt.com"
                 desc = entry.description.text if entry.description else "No tagline provided."
-                # 简单清理 HTML 标签
                 clean_desc = BeautifulSoup(desc, "html.parser").get_text(strip=True)
                 
                 items.append({
@@ -88,25 +72,22 @@ def fetch_product_hunt_rss():
                     "url": link
                 })
     except Exception as e:
-        print(f"Error fetching Product Hunt RSS: {e}")
+        print(f"Warning: Error fetching Product Hunt RSS: {e}")
         
     if not items:
         items = [{
             "title": "Product Hunt Daily Top",
-            "desc": "Visit Product Hunt directly to explore today's top launches.",
+            "desc": "Visit Product Hunt directly to explore today's launches.",
             "url": "https://www.producthunt.com/"
         }]
-        
     return items
 
 def build_feishu_card():
-    """组装飞书富文本卡片格式"""
     gh_items = fetch_github_trending()
     ph_items = fetch_product_hunt_rss()
     
     content_lines = ["🌍 **全球创作者日报 | Global Creator Daily**\n"]
     
-    # GitHub 部分
     content_lines.append("### 🔥 GitHub Trending (开源风向)")
     for idx, item in enumerate(gh_items, 1):
         zh_desc = translate_to_zh(item['desc'])
@@ -116,7 +97,6 @@ def build_feishu_card():
             f"   - 🇨🇳 *CN:* {zh_desc}\n"
         )
         
-    # Product Hunt 部分
     content_lines.append("\n### 🚀 Product Hunt (创意产品)")
     for idx, item in enumerate(ph_items, 1):
         zh_desc = translate_to_zh(item['desc'])
@@ -146,7 +126,8 @@ def build_feishu_card():
 
 def send_to_feishu():
     if not FEISHU_WEBHOOK_URL:
-        raise ValueError("FEISHU_WEBHOOK_URL is not set in environment variables.")
+        print("Error: FEISHU_WEBHOOK_URL is not set.")
+        return
         
     payload = build_feishu_card()
     headers = {'Content-Type': 'application/json'}
@@ -154,4 +135,10 @@ def send_to_feishu():
     print("Feishu Response:", response.json())
 
 if __name__ == "__main__":
-    send_to_feishu()
+    try:
+        send_to_feishu()
+    except Exception as e:
+        print(f"Fatal error in execution: {e}")
+        # 如果你想让出错时也显示成功而不中断，可以注释掉下面这行；
+        # 但保留可以让 Actions 正确报错。
+        raise e
