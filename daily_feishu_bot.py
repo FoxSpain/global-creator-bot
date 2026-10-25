@@ -11,19 +11,23 @@ if GEMINI_API_KEY:
     try:
         from google import genai
         client = genai.Client(api_key=GEMINI_API_KEY)
+        print("[Gemini] SDK initialized successfully.")
     except Exception as e:
-        print(f"[Gemini Init Warning] {e}")
+        print(f"[Gemini Init Error] {e}")
+else:
+    print("[Gemini Warning] GEMINI_API_KEY is not set in environment variables!")
 
 def analyze_item_with_gemini(title, desc):
-    """使用 Gemini 分析项目，带强容错与重试"""
+    """使用 Gemini 分析项目，带详细日志与智能兜底"""
+    # 基础兜底，防止全部内容一模一样
     default_res = {
-        "cn_desc": desc,
-        "problem": "快速切入特定场景的用户真实痛点",
-        "tech": "轻量化架构或高效产品模式",
-        "action": "可作为独立开发者的副业项目参考"
+        "cn_desc": f"关于 {title} 的创新应用或技术实现方案。",
+        "problem": f"针对 {title[:15]} 场景下的效率与体验痛点",
+        "tech": "基于当前前沿 AI Agent 或自动化架构",
+        "action": "可作为独立开发或垂直领域工具的参考原型"
     }
 
-    if not client or "Product Hunt Hot Product" in title:
+    if not client:
         return default_res
 
     prompt = f"""
@@ -55,7 +59,7 @@ def analyze_item_with_gemini(title, desc):
         data = json.loads(text.strip())
         return data
     except Exception as e:
-        print(f"[Gemini API Warning] {title}: {e}")
+        print(f"[Gemini API Error for '{title}']: {e}")
         return default_res
 
 def fetch_github_trending():
@@ -81,53 +85,44 @@ def fetch_github_trending():
     return items[:10]
 
 def fetch_product_hunt():
-    """优化版 Product Hunt 抓取，改用多重稳定 API 聚合源"""
+    """精准清洗版 Product Hunt 抓取"""
     items = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    url = "https://r.jina.ai/https://www.producthunt.com/"
     
-    # 增加更多稳定的公开 RSS / 聚合源
-    sources = [
-        "https://r.jina.ai/https://www.producthunt.com/", # 利用优秀的网页转 Markdown 服务绕过反爬
-        "https://rsshub.app/producthunt/today"
-    ]
-    
-    for url in sources:
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                if "r.jina.ai" in url:
-                    # 解析 jina 代理返回的结构化文本
-                    lines = response.text.split('\n')
-                    for line in lines:
-                        if "[" in line and "](" in line and "http" in line:
-                            # 简易提取标题与链接
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            lines = response.text.split('\n')
+            for line in lines:
+                # 过滤并清洗干净产品名称
+                if "[" in line and "](" in line and "http" in line and "Image" not in line and "Promoted" not in line:
+                    try:
+                        # 提取中括号内的标题
+                        start = line.index('[') + 1
+                        end = line.index(']')
+                        raw_title = line[start:end].strip()
+                        # 清理掉开头的序号如 "1. "
+                        if "." in raw_title[:3]:
+                            raw_title = raw_title.split(".", 1)[-1].strip()
+                            
+                        if len(raw_title) > 2 and raw_title not in [i['title'] for i in items]:
                             items.append({
-                                "title": line.strip()[:40],
-                                "desc": "Trending product launched on Product Hunt.",
+                                "title": raw_title,
+                                "desc": "New creative product launched on Product Hunt today.",
                                 "url": "https://www.producthunt.com/"
                             })
-                            if len(items) >= 10:
-                                break
-                else:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    for entry in soup.find_all(['item', 'entry'])[:10]:
-                        title = entry.find('title')
-                        link = entry.find('link')
-                        desc = entry.find(['description', 'summary'])
-                        t_str = title.text.strip() if title else ""
-                        l_str = link.get('href') or link.text.strip() if link else "https://www.producthunt.com"
-                        d_str = BeautifulSoup(desc.text, 'html.parser').get_text(strip=True) if desc else "New launch"
-                        if t_str:
-                            items.append({"title": t_str, "desc": d_str[:120], "url": l_str})
-            if len(items) >= 5:
-                break
-        except Exception as e:
-            print(f"[PH Source Error] {url}: {e}")
+                    except Exception:
+                        continue
+                if len(items) >= 10:
+                    break
+    except Exception as e:
+        print(f"[PH Source Error]: {e}")
 
-    # 如果依然拿不到，直接精简提示
+    # 兜底
     if not items:
         items = [{
-            "title": f"Product Hunt 每日精选 #{i+1}",
+            "title": f"Product Hunt 创意产品 #{i+1}",
             "desc": "Explore top daily creative products on Product Hunt.",
             "url": "https://www.producthunt.com/"
         } for i in range(10)]
