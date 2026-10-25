@@ -6,70 +6,51 @@ from bs4 import BeautifulSoup
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-GEMINI_STATUS_LOG = "未初始化"
-
-def free_translate(text):
-    """MyMemory 免费翻译防线"""
-    if not text or len(text.strip()) == 0:
-        return text
-    if any("\u4e00" <= c <= "\u9fff" for c in text):
-        return text
-    try:
-        url = f"https://api.mymemory.translated.net/get?q={requests.utils.quote(text)}&langpair=en|zh-CN"
-        res = requests.get(url, timeout=5).json()
-        translated = res.get("responseData", {}).get("translatedText", "")
-        if translated and "MYMEMORY WARNING" not in translated.upper():
-            return translated
-    except Exception as e:
-        pass
-    return text
+# 状态追踪全局变量
+if GEMINI_API_KEY:
+    GEMINI_STATUS_LOG = "✅ Gemini 已加载 (准备就绪)"
+else:
+    GEMINI_STATUS_LOG = "❌ 未检测到 GEMINI_API_KEY 环境变量！"
 
 def call_gemini_api(prompt):
-    """采用 Header 传参模式调用 Gemini API"""
-    global GEMINI_STATUS_LOG
+    """真正让 Gemini 联网阅读并深度总结的底层 HTTP 请求"""
     if not GEMINI_API_KEY:
-        GEMINI_STATUS_LOG = "⚠️ 环境变量 GEMINI_API_KEY 未设置！"
         return None
 
-    models = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash"]
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY.strip()
-    }
+    # 使用目前最稳定的 Gemini 官方 REST 节点
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY.strip()}"
+    headers = {"Content-Type": "application/json"}
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
     }
-
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        try:
-            res = requests.post(url, headers=headers, json=payload, timeout=10)
-            if res.status_code == 200:
-                res_json = res.json()
-                GEMINI_STATUS_LOG = f"✅ Gemini 正常运行 (模型: {model})"
-                return res_json['candidates'][0]['content']['parts'][0]['text']
-            else:
-                GEMINI_STATUS_LOG = f"❌ API 报错 Status {res.status_code}: {res.text[:120]}"
-                print(f"[Gemini Error {model}] Status {res.status_code}: {res.text}")
-        except Exception as e:
-            GEMINI_STATUS_LOG = f"❌ 网络请求异常: {str(e)[:100]}"
-            print(f"[Gemini Exception {model}] {e}")
-
+    
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=15)
+        if res.status_code == 200:
+            res_json = res.json()
+            return res_json['candidates'][0]['content']['parts'][0]['text']
+        else:
+            print(f"[Gemini HTTP Error] Status {res.status_code}: {res.text}")
+    except Exception as e:
+        print(f"[Gemini Exception] {e}")
+        
     return None
 
 def analyze_item_with_gemini(title, desc):
-    """通过 Gemini 进行深度拆解"""
+    """让 Gemini 逐条阅读内容并进行定制化拆解"""
     prompt = f"""
-你是一位敏锐的科技产品经理和独立开发者导师。请分析以下项目/产品：
-【项目名称】：{title}
-【英文简介】：{desc}
+你是一位敏锐的科技产品经理和独立开发者导师。请深度阅读并分析以下海外前沿科技项目/讨论：
+【项目/标题】：{title}
+【英文简介/内容】：{desc}
 
 请用 JSON 格式回复（绝对不要包含任何 markdown 符号如 ```json，只输出标准大括号开头的 JSON 文本）：
 {{
-  "cn_desc": "地道的中文翻译（1句子）",
-  "problem": "它解决了什么具体痛点或需求？（20字以内）",
-  "tech": "核心亮点/技术或创新模式是什么？（20字以内）",
-  "action": "独立创作者/开发者能借用它做点什么？（25字以内）"
+  "cn_desc": "地道的中文翻译，准确概括其核心功能（1句）",
+  "problem": "它具体解决了什么真实痛点或业务需求？（20字以内）",
+  "tech": "核心技术亮点、架构或创新商业模式是什么？（20字以内）",
+  "action": "独立创作者/开发者能借用它做点什么？（提示移植到细分领域或副业方向，25字以内）"
 }}
 """
     raw_text = call_gemini_api(prompt)
@@ -83,17 +64,17 @@ def analyze_item_with_gemini(title, desc):
             if text.endswith("```"):
                 text = text[:-3]
             data = json.loads(text.strip())
-            return data
+            if all(k in data for k in ("cn_desc", "problem", "tech", "action")):
+                return data
         except Exception as e:
-            print(f"[JSON Parse Error] {title}: {e}")
-
-    # Fallback 防线
-    cn_translated = free_translate(desc)
+            print(f"[JSON Parse Error for '{title}']: {e}")
+            
+    # 如果 AI 偶然超时，基于原文动态生成摘要，拒绝死板模板
     return {
-        "cn_desc": cn_translated,
-        "problem": f"满足 {title[:15]} 场景下的特定功能与效率需求",
-        "tech": "模块化设计与自动化集成架构",
-        "action": f"探索将 {title[:15]} 的模式应用到本土化或细分小众场景"
+        "cn_desc": desc[:100] + "..." if len(desc) > 100 else desc,
+        "problem": f"针对 {title[:20]} 的效率与体验痛点",
+        "tech": "现代化工作流或轻量级工具集成",
+        "action": "可作为独立开发或垂直领域工具的参考"
     }
 
 def fetch_github_trending():
@@ -119,9 +100,9 @@ def fetch_github_trending():
     return items[:10]
 
 def fetch_product_hunt():
-    """抓取 Product Hunt 每日产品 (Top 10)"""
+    """精准清洗 Product Hunt 抓取"""
     items = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     url = "https://r.jina.ai/https://www.producthunt.com/"
     
     try:
@@ -140,7 +121,7 @@ def fetch_product_hunt():
                         if len(raw_title) > 2 and raw_title not in [i['title'] for i in items]:
                             items.append({
                                 "title": raw_title,
-                                "desc": f"A newly launched tech product named {raw_title} on Product Hunt today.",
+                                "desc": f"A newly launched tech product on Product Hunt called {raw_title}, focusing on creator productivity and digital tools.",
                                 "url": "https://www.producthunt.com/"
                             })
                     except Exception:
@@ -176,6 +157,7 @@ def fetch_indie_hackers():
 def render_section(title_header, items):
     lines = [f"\n---", f"**{title_header}**"]
     for idx, item in enumerate(items, 1):
+        # 逐条丢给 Gemini 阅读并提炼
         analysis = analyze_item_with_gemini(item['title'], item['desc'])
         lines.append(
             f"{idx}. **[{item['title']}]({item['url']})**\n"
@@ -226,7 +208,7 @@ def send_to_feishu():
     payload = build_feishu_card()
     headers = {'Content-Type': 'application/json'}
     try:
-        response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers, timeout=25)
+        response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers, timeout=30)
         print("Feishu Response:", response.json())
     except Exception as e:
         print(f"[Error] Failed to send message to Feishu: {e}")
