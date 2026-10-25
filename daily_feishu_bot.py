@@ -6,13 +6,14 @@ from bs4 import BeautifulSoup
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+GEMINI_STATUS_LOG = "未初始化"
+
 def free_translate(text):
-    """MyMemory 免费公共翻译防线"""
+    """MyMemory 免费翻译防线"""
     if not text or len(text.strip()) == 0:
         return text
     if any("\u4e00" <= c <= "\u9fff" for c in text):
         return text
-
     try:
         url = f"https://api.mymemory.translated.net/get?q={requests.utils.quote(text)}&langpair=en|zh-CN"
         res = requests.get(url, timeout=5).json()
@@ -20,38 +21,44 @@ def free_translate(text):
         if translated and "MYMEMORY WARNING" not in translated.upper():
             return translated
     except Exception as e:
-        print(f"[Translation Warning] {e}")
+        pass
     return text
 
 def call_gemini_api(prompt):
-    """直接使用 requests 调用 Google AI Studio API"""
+    """采用 Header 传参模式调用 Gemini API"""
+    global GEMINI_STATUS_LOG
     if not GEMINI_API_KEY:
-        print("[Gemini Warning] GEMINI_API_KEY is not set.")
+        GEMINI_STATUS_LOG = "⚠️ 环境变量 GEMINI_API_KEY 未设置！"
         return None
 
-    # 依次尝试兼容的 Endpoint
-    models = ["gemini-2.5-flash", "gemini-1.5-flash"]
-    
+    models = ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash"]
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY.strip()
+    }
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+
     for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}]
-        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=10)
             if res.status_code == 200:
                 res_json = res.json()
+                GEMINI_STATUS_LOG = f"✅ Gemini 正常运行 (模型: {model})"
                 return res_json['candidates'][0]['content']['parts'][0]['text']
             else:
-                print(f"[Gemini Try {model} Failed] Status: {res.status_code}, Msg: {res.text[:100]}")
+                GEMINI_STATUS_LOG = f"❌ API 报错 Status {res.status_code}: {res.text[:120]}"
+                print(f"[Gemini Error {model}] Status {res.status_code}: {res.text}")
         except Exception as e:
+            GEMINI_STATUS_LOG = f"❌ 网络请求异常: {str(e)[:100]}"
             print(f"[Gemini Exception {model}] {e}")
 
     return None
 
 def analyze_item_with_gemini(title, desc):
-    """使用 Gemini 分析，若 Gemini 未响应则自动开启真实翻译防线"""
+    """通过 Gemini 进行深度拆解"""
     prompt = f"""
 你是一位敏锐的科技产品经理和独立开发者导师。请分析以下项目/产品：
 【项目名称】：{title}
@@ -78,15 +85,15 @@ def analyze_item_with_gemini(title, desc):
             data = json.loads(text.strip())
             return data
         except Exception as e:
-            print(f"[JSON Parse Warning] '{title}': {e}")
+            print(f"[JSON Parse Error] {title}: {e}")
 
-    # Gemini 未通时的真实 fallback（绝不使用套话）
+    # Fallback 防线
     cn_translated = free_translate(desc)
     return {
         "cn_desc": cn_translated,
-        "problem": f"提炼 {title} 在相关应用场景下的实用效率需求",
-        "tech": "开源机制、Agent 插件化或轻量级工具集成",
-        "action": f"可参考 {title} 的定位，探索垂直场景的工具二次开发"
+        "problem": f"满足 {title[:15]} 场景下的特定功能与效率需求",
+        "tech": "模块化设计与自动化集成架构",
+        "action": f"探索将 {title[:15]} 的模式应用到本土化或细分小众场景"
     }
 
 def fetch_github_trending():
@@ -112,9 +119,9 @@ def fetch_github_trending():
     return items[:10]
 
 def fetch_product_hunt():
-    """精准清洗版 Product Hunt 抓取"""
+    """抓取 Product Hunt 每日产品 (Top 10)"""
     items = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     url = "https://r.jina.ai/https://www.producthunt.com/"
     
     try:
@@ -184,9 +191,13 @@ def render_section(title_header, items):
 def build_feishu_card():
     gh_items = fetch_github_trending()
     ph_items = fetch_product_hunt()
-    ih_items = fetch_product_hunt() if not fetch_indie_hackers() else fetch_indie_hackers()
+    ih_items = fetch_indie_hackers()
     
-    content_lines = ["🌍 **全球创作者日报 | Global Creator Daily**\n"]
+    content_lines = [
+        "🌍 **全球创作者日报 | Global Creator Daily**",
+        f"⚙️ **Gemini 引擎状态**：{GEMINI_STATUS_LOG}\n"
+    ]
+    
     if gh_items:
         content_lines.extend(render_section("🔥 GitHub 开源风向标 (Top 10)", gh_items))
     if ph_items:
