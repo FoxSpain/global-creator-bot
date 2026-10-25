@@ -6,29 +6,42 @@ from bs4 import BeautifulSoup
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-client = None
-if GEMINI_API_KEY:
+def call_gemini_api(prompt):
+    """使用原生 requests 直接调用 Gemini REST API，极致稳定"""
+    if not GEMINI_API_KEY:
+        print("[Gemini Error] GEMINI_API_KEY is missing in env!")
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
     try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        print("[Gemini] SDK initialized successfully.")
+        response = requests.post(url, headers=headers, json=payload, timeout=12)
+        if response.status_code == 200:
+            res_json = response.json()
+            text = res_json['candidates'][0]['content']['parts'][0]['text']
+            return text
+        else:
+            print(f"[Gemini API HTTP Error] Status Code {response.status_code}: {response.text}")
     except Exception as e:
-        print(f"[Gemini Init Error] {e}")
-else:
-    print("[Gemini Warning] GEMINI_API_KEY is not set in environment variables!")
+        print(f"[Gemini API Exception] {e}")
+        
+    return None
 
 def analyze_item_with_gemini(title, desc):
-    """使用 Gemini 分析项目，带详细日志与智能兜底"""
-    # 基础兜底，防止全部内容一模一样
+    """使用 Gemini 分析项目，提取真实痛点、亮点与借用灵感"""
+    # 动态有意义的纯文本兜底（万一 API 失败）
     default_res = {
-        "cn_desc": f"关于 {title} 的创新应用或技术实现方案。",
-        "problem": f"针对 {title[:15]} 场景下的效率与体验痛点",
-        "tech": "基于当前前沿 AI Agent 或自动化架构",
-        "action": "可作为独立开发或垂直领域工具的参考原型"
+        "cn_desc": f"关于 {title} 的技术方案与核心功能介绍。",
+        "problem": "缺少针对该细分场景的自动化或智能化工具",
+        "tech": "模块化工作流与轻量级集成架构",
+        "action": "可尝试将其逻辑迁移至桌面小工具或特定垂直领域"
     }
-
-    if not client:
-        return default_res
 
     prompt = f"""
 你是一位敏锐的科技产品经理和独立开发者导师。请分析以下项目/产品：
@@ -37,30 +50,28 @@ def analyze_item_with_gemini(title, desc):
 
 请用 JSON 格式回复（绝对不要包含任何 markdown 符号如 ```json，只输出标准大括号开头的 JSON 文本）：
 {{
-  "cn_desc": "地道的中文翻译（1句话）",
+  "cn_desc": "地道的中文翻译（1句子）",
   "problem": "它解决了什么具体痛点或需求？（20字以内）",
   "tech": "核心亮点/技术或创新模式是什么？（20字以内）",
-  "action": "独立创作者/开发者能借用它做点什么？（25字以内）"
+  "action": "独立创作者/开发者能借用它做点什么？（提示移植到细分领域、小众工具或副业方向，25字以内）"
 }}
 """
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
-        text = response.text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        
-        data = json.loads(text.strip())
-        return data
-    except Exception as e:
-        print(f"[Gemini API Error for '{title}']: {e}")
-        return default_res
+    raw_text = call_gemini_api(prompt)
+    if raw_text:
+        try:
+            text = raw_text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            data = json.loads(text.strip())
+            return data
+        except Exception as e:
+            print(f"[JSON Parse Error for '{title}']: {e}, Raw text: {raw_text}")
+            
+    return default_res
 
 def fetch_github_trending():
     """抓取 GitHub Trending (Top 10)"""
@@ -95,21 +106,18 @@ def fetch_product_hunt():
         if response.status_code == 200:
             lines = response.text.split('\n')
             for line in lines:
-                # 过滤并清洗干净产品名称
                 if "[" in line and "](" in line and "http" in line and "Image" not in line and "Promoted" not in line:
                     try:
-                        # 提取中括号内的标题
                         start = line.index('[') + 1
                         end = line.index(']')
                         raw_title = line[start:end].strip()
-                        # 清理掉开头的序号如 "1. "
                         if "." in raw_title[:3]:
                             raw_title = raw_title.split(".", 1)[-1].strip()
                             
                         if len(raw_title) > 2 and raw_title not in [i['title'] for i in items]:
                             items.append({
                                 "title": raw_title,
-                                "desc": "New creative product launched on Product Hunt today.",
+                                "desc": f"A newly launched tech product named {raw_title} on Product Hunt today.",
                                 "url": "https://www.producthunt.com/"
                             })
                     except Exception:
@@ -118,14 +126,6 @@ def fetch_product_hunt():
                     break
     except Exception as e:
         print(f"[PH Source Error]: {e}")
-
-    # 兜底
-    if not items:
-        items = [{
-            "title": f"Product Hunt 创意产品 #{i+1}",
-            "desc": "Explore top daily creative products on Product Hunt.",
-            "url": "https://www.producthunt.com/"
-        } for i in range(10)]
 
     return items[:10]
 
@@ -199,7 +199,7 @@ def send_to_feishu():
     payload = build_feishu_card()
     headers = {'Content-Type': 'application/json'}
     try:
-        response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers, timeout=15)
+        response = requests.post(FEISHU_WEBHOOK_URL, data=json.dumps(payload), headers=headers, timeout=20)
         print("Feishu Response:", response.json())
     except Exception as e:
         print(f"[Error] Failed to send message to Feishu: {e}")
