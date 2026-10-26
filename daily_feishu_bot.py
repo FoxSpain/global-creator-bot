@@ -68,13 +68,14 @@ def fetch_github_trending():
     return items[:10]
 
 def fetch_product_hunt():
-    """抓取 Product Hunt 每日产品 (Top 10)"""
+    """多源加固版 Product Hunt 抓取 (带降级重试)"""
     items = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    url = "https://r.jina.ai/https://www.producthunt.com/"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
+    # 通道 1: Jina AI 网页代理
+    url_jina = "https://r.jina.ai/https://www.producthunt.com/"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url_jina, headers=headers, timeout=8)
         if response.status_code == 200:
             lines = response.text.split('\n')
             for line in lines:
@@ -97,7 +98,39 @@ def fetch_product_hunt():
                 if len(items) >= 10:
                     break
     except Exception as e:
-        print(f"[PH Source Error]: {e}")
+        print(f"[PH Jina Source Warning]: {e}")
+
+    # 通道 2: 备用 RSS 源 (如果通道 1 失败)
+    if not items:
+        print("[PH Warning] Jina source failed, switching to backup RSS feeds...")
+        backup_sources = [
+            "https://rsshub.app/producthunt/today",
+            "https://rssfeed.today/producthunt/today",
+            "https://www.producthunt.com/feed"
+        ]
+        for rss_url in backup_sources:
+            try:
+                res = requests.get(rss_url, headers=headers, timeout=6)
+                if res.status_code == 200:
+                    soup = BeautifulSoup(res.text, 'xml') or BeautifulSoup(res.text, 'html.parser')
+                    entries = soup.find_all(['item', 'entry'])
+                    for entry in entries[:10]:
+                        title = entry.find('title')
+                        link = entry.find('link')
+                        t_str = title.text.strip() if title else ""
+                        l_str = "https://www.producthunt.com/"
+                        if link:
+                            l_str = link.get('href') or link.text.strip()
+                        if t_str and t_str not in [i['title'] for i in items]:
+                            items.append({
+                                "title": t_str,
+                                "desc": f"Today's featured product launch on Product Hunt: {t_str}.",
+                                "url": l_str
+                            })
+                if len(items) >= 5:
+                    break
+            except Exception as e:
+                print(f"[PH Backup Source Error] {rss_url}: {e}")
 
     return items[:10]
 
@@ -122,8 +155,9 @@ def fetch_indie_hackers():
         print(f"[Indie Hackers Warning] {e}")
     return items[:10]
 
-def render_section(title_header, items):
-    lines = [f"\n---", f"**{title_header}**"]
+def render_section_text(title_header, items):
+    """生成单个板块的纯 Markdown 文本内容"""
+    lines = [f"**{title_header}**"]
     for idx, item in enumerate(items, 1):
         cn_desc = translate_with_gemini_or_fallback(item['desc'])
         lines.append(
@@ -131,23 +165,38 @@ def render_section(title_header, items):
             f"   - 🇬🇧 EN: {item['desc']}\n"
             f"   - 🇨🇳 CN: {cn_desc}"
         )
-    return lines
+    return "\n".join(lines)
 
 def build_feishu_card():
     gh_items = fetch_github_trending()
     ph_items = fetch_product_hunt()
     ih_items = fetch_indie_hackers()
     
-    content_lines = ["🌍 **全球创作者日报 | Global Creator Daily**\n"]
+    elements = [
+        {
+            "tag": "markdown",
+            "content": "🌍 **全球创作者日报 | Global Creator Daily**\n"
+        }
+    ]
     
+    sections = []
     if gh_items:
-        content_lines.extend(render_section("🔥 GitHub 开源风向标 (Top 10)", gh_items))
+        sections.append(render_section_text("🔥 GitHub 开源风向标 (Top 10)", gh_items))
     if ph_items:
-        content_lines.extend(render_section("🚀 Product Hunt 创意产品 (Top 10)", ph_items))
+        sections.append(render_section_text("🚀 Product Hunt 创意产品 (Top 10)", ph_items))
     if ih_items:
-        content_lines.extend(render_section("💡 Indie Hackers 独立开发与变现 (Top 10)", ih_items))
+        sections.append(render_section_text("💡 Indie Hackers 独立开发与变现 (Top 10)", ih_items))
         
-    card_content = "\n".join(content_lines)
+    # 用飞书原生的 hr (Horizontal Rule) 分割线区块连接各个板块
+    for idx, section_content in enumerate(sections):
+        elements.append({
+            "tag": "markdown",
+            "content": section_content
+        })
+        # 如果不是最后一个板块，插入一条分割线区块
+        if idx < len(sections) - 1:
+            elements.append({"tag": "hr"})
+
     payload = {
         "msg_type": "interactive",
         "card": {
@@ -156,7 +205,7 @@ def build_feishu_card():
                 "title": {"tag": "plain_text", "content": "💡 每日全球开源与商业创意灵感"},
                 "template": "blue"
             },
-            "elements": [{"tag": "markdown", "content": card_content}]
+            "elements": elements
         }
     }
     return payload
